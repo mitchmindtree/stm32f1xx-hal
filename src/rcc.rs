@@ -450,7 +450,6 @@ impl CFGR {
     #[cfg(feature = "stm32f107")]
     pub fn freeze_explicit(
         self,
-        acr: &mut ACR,
         hse_frequency: u32,
         hse_prediv: rcc::cfgr2::PREDIV1_A,
         hse_prediv2: rcc::cfgr2::PREDIV2_A,
@@ -468,6 +467,7 @@ impl CFGR {
         usb_prescaler: pac::rcc::cfgr::OTGFSPRE_A,
     ) -> Clocks {
         let rcc = unsafe { &*RCC::ptr() };
+        let flash = unsafe { &mut *(crate::stm32::FLASH::ptr() as *mut crate::stm32::flash::RegisterBlock) };
 
         {
             rcc.cr.modify(|_, w| w.hseon().set_bit());
@@ -543,7 +543,7 @@ impl CFGR {
         {
             // Peripheral clocks config
 
-            acr.acr().modify(|_, w| w.latency().variant(flash_latency));
+            flash.acr.modify(|_, w| w.latency().variant(flash_latency));
 
             {
                 // "Set the highest APBx dividers in order to ensure that we do not go through
@@ -561,7 +561,7 @@ impl CFGR {
             }
 
             // set flash latency again (maybe it can change with clocks?)
-            acr.acr().modify(|_, w| w.latency().variant(flash_latency));
+            flash.acr.modify(|_, w| w.latency().variant(flash_latency));
 
             rcc.cfgr.modify(|_, w| {
                 w.ppre1()
