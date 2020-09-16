@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Fixed
 
 - Fix MonoTimer not working in debug mode.
+- Add missing TX DMA implementation for SPI3.
 
 ## [v0.6.1] - 2020-06-25
 
