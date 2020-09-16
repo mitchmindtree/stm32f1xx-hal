@@ -29,6 +29,7 @@ impl RccExt for RCC {
                 pclk2: None,
                 sysclk: None,
                 adcclk: None,
+                pll3: None,
             },
             bkp: BKP { _0: () },
         }
@@ -152,6 +153,7 @@ pub struct CFGR {
     pclk2: Option<u32>,
     sysclk: Option<u32>,
     adcclk: Option<u32>,
+    pll3: Option<u32>,
 }
 
 impl CFGR {
@@ -211,6 +213,17 @@ impl CFGR {
         self
     }
 
+    /// Sets the desired frequency for PLL3.
+    ///
+    /// Note: HSE must be enabled to drive PLL3.
+    pub fn pll3<F>(mut self, freq: F) -> Self
+    where
+        F: Into<Hertz>,
+    {
+        self.pll3 = Some(freq.into().0);
+        self
+    }
+
     /// Applies the clock configuration and returns a `Clocks` struct that signifies that the
     /// clocks are frozen, and contains the frequencies used. After this function is called,
     /// the clocks can not change
@@ -223,22 +236,49 @@ impl CFGR {
     /// let mut rcc = dp.RCC.constrain();
     /// let clocks = rcc.cfgr.freeze(&mut flash.acr);
     /// ```
-
     pub fn freeze(self, acr: &mut ACR) -> Clocks {
         let pllsrcclk = self.hse.unwrap_or(HSI / 2);
-
-        let pllmul = self.sysclk.unwrap_or(pllsrcclk) / pllsrcclk;
-
-        let (pllmul_bits, sysclk) = if pllmul == 1 {
-            (None, self.hse.unwrap_or(HSI))
-        } else {
+        let (prediv1_bits, pllmul_bits, sysclk) = {
             #[cfg(not(feature = "connectivity"))]
-            let pllmul = cmp::min(cmp::max(pllmul, 1), 16);
-
+            {
+                let pllmul = self.sysclk.unwrap_or(pllsrcclk) / pllsrcclk;
+                let pllmul = cmp::min(cmp::max(pllmul, 1), 16);
+                if pllmul == 1 {
+                    (None, None, self.hse.unwarp_or(HSI))
+                } else {
+                    let pllmul_bits = pllmul as u8 - 2;
+                    let sysclk = pllsrcclk * pllmul;
+                    (None, Some(pllmul_bits), sysclk)
+                }
+            }
             #[cfg(feature = "connectivity")]
-            let pllmul = cmp::min(cmp::max(pllmul, 4), 9);
-
-            (Some(pllmul as u8 - 2), pllsrcclk * pllmul)
+            {
+                match self.hse {
+                    None => {
+                        // TODO: Case missing for PLLMUL multiplier of 6.5.
+                        let pllmul = self.sysclk.unwrap_or(pllsrcclk) / pllsrcclk;
+                        let pllmul = cmp::min(cmp::max(pllmul, 4), 9);
+                        if pllmul == 1 {
+                            (None, None, HSI)
+                        } else {
+                            let pllmul_bits = pllmul as u8 - 2;
+                            let sysclk = pllsrcclk * pllmul;
+                            (None, Some(pllmul_bits), sysclk)
+                        }
+                    }
+                    Some(hse) => {
+                        let target_sysclk = self.sysclk.unwrap_or(hse);
+                        let res = calc_closest_prediv1_pllmul_and_sysclk(pllsrcclk, target_sysclk);
+                        let (prediv1, pllmul, sysclk) = match res {
+                            None => unimplemented!("return `Err` indicating invalid input"),
+                            Some(v) => v,
+                        };
+                        let prediv1_bits = if prediv1 == 1 { None } else { Some(prediv1 as u8 - 1) };
+                        let pllmul_bits = if pllmul == 1 { None } else { Some(pllmul as u8 - 2) };
+                        (prediv1_bits, pllmul_bits, sysclk)
+                    }
+                }
+            }
         };
 
         assert!(sysclk <= 72_000_000);
@@ -340,13 +380,20 @@ impl CFGR {
         assert!(adcclk <= 14_000_000);
 
         let rcc = unsafe { &*RCC::ptr() };
-
         if self.hse.is_some() {
             // enable HSE and wait for it to be ready
-
             rcc.cr.modify(|_, w| w.hseon().set_bit());
 
             while rcc.cr.read().hserdy().bit_is_clear() {}
+        }
+
+        if let Some(prediv1_bits) = prediv1_bits {
+            // Connectivity line devices may require PREDIV1.
+            // Must be done before PLL enabled.
+            #[cfg(feature = "connectivity")]
+            rcc.cfgr2.modify(|_, w| w.prediv1().bits(prediv1_bits));
+            #[cfg(not(feature = "connectivity"))]
+            let _ = prediv1_bits;
         }
 
         if let Some(pllmul_bits) = pllmul_bits {
@@ -436,6 +483,30 @@ impl CFGR {
                 })
         });
 
+        // If PLL3 was specified, retrieve the prediv2 and pll3mul bits.
+        let pll3_parts = match (self.pll3, self.hse) {
+            (Some(pll3_hz), Some(hse_hz)) if pll3_hz == hse_hz => {
+                let div_8 = 0b0111;
+                let mul_8 = 0b0110;
+                Some((div_8, mul_8))
+            }
+            (Some(_), Some(_)) => unimplemented!("calculate prediv2 and pll3mul"),
+            (Some(_), None) => unimplemented!("indicate that HSE must be enabled"),
+            _ => None,
+        };
+
+        // Enable PLL3 if requested.
+        if let Some((prediv2_bits, pll3mul_bits)) = pll3_parts {
+            rcc.cfgr2.modify(|_, w| unsafe {
+                w.prediv2()
+                    .bits(prediv2_bits)
+                    .pll3mul()
+                    .bits(pll3mul_bits)
+            });
+            rcc.cr.modify(|_, w| w.pll3on().set_bit());
+            while rcc.cr.read().pll3rdy().bit_is_clear() {}
+        }
+
         Clocks {
             hclk: Hertz(hclk),
             pclk1: Hertz(pclk1),
@@ -447,6 +518,50 @@ impl CFGR {
             usbclk_valid,
         }
     }
+}
+
+/// Given the PLLSRCCLK frequency and the target SYSCLK frequency, determine the PREDIV1
+/// prescaler and PLLMUL multiplier required to achieve the closest valid SYSCLK that is
+/// equal to or less than the `target_sysclk`.
+///
+/// Returns the PREDIV1 prescaler, PLLMUL multiplier and resulting SYSCLK respectively, or
+/// `None` in the case that no valid combination could be determined.
+#[cfg(feature = "connectivity")]
+fn calc_closest_prediv1_pllmul_and_sysclk(pllsrcclk: u32, target_sysclk: u32) -> Option<(u32, u32, u32)> {
+    let prediv1_range = 1u32..=16;
+
+    // We double the PLLMUL values here, but divide them again in the following
+    // calculation. We do this so that we can work with integer values, despite one of the
+    // connectivity line PLLMUL multipliers bing 6.5.
+    let pllmul_x2_range = [
+        4 * 2,
+        5 * 2,
+        6 * 2,
+        7 * 2,
+        8 * 2,
+        9 * 2,
+        13u32, // 6.5 * 2
+    ];
+
+    let mut closest  = None;
+    for prediv1 in prediv1_range {
+        for &pllmul_x2 in &pllmul_x2_range {
+            let res = pllsrcclk * pllmul_x2 / 2 / prediv1;
+            // If we found the target, return early.
+            if res == target_sysclk {
+                return Some((prediv1, pllmul_x2 / 2, res));
+            // Otherwise update the closest.
+            } else if res < target_sysclk {
+                closest = match closest {
+                    None => Some((prediv1, pllmul_x2, res)),
+                    Some((_, _, closest)) if res > closest => Some((prediv1, pllmul_x2, res)),
+                    _ => closest,
+                };
+            }
+        }
+    }
+
+    closest.map(|(pd, pl_x2, res)| (pd, pl_x2 / 2, res))
 }
 
 pub struct BKP {
