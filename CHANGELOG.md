@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 - MonoTimer now takes ownership of the DCB register
 - SPI objects now have a `FrameSize` type field
+- Add missing remap to `spi3` constructor. Requires a new `mapr` argument.
 
 ### Added
 
