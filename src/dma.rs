@@ -302,9 +302,7 @@ macro_rules! dma {
                             !self.payload.channel.in_progress()
                         }
 
-                        pub fn wait(mut self) -> (BUFFER, RxDma<PAYLOAD, $CX>) {
-                            while !self.is_done() {}
-
+                        pub fn stop(mut self) -> (BUFFER, RxDma<PAYLOAD, $CX>) {
                             atomic::compiler_fence(Ordering::Acquire);
 
                             self.payload.stop();
@@ -317,6 +315,11 @@ macro_rules! dma {
                             atomic::compiler_fence(Ordering::Acquire);
 
                             (self.buffer, self.payload)
+                        }
+
+                        pub fn wait(self) -> (BUFFER, RxDma<PAYLOAD, $CX>) {
+                            while !self.is_done() {}
+                            self.stop()
                         }
                     }
 
@@ -328,9 +331,7 @@ macro_rules! dma {
                             !self.payload.channel.in_progress()
                         }
 
-                        pub fn wait(mut self) -> (BUFFER, TxDma<PAYLOAD, $CX>) {
-                            while !self.is_done() {}
-
+                        pub fn stop(mut self) -> (BUFFER, TxDma<PAYLOAD, $CX>) {
                             atomic::compiler_fence(Ordering::Acquire);
 
                             self.payload.stop();
@@ -343,6 +344,11 @@ macro_rules! dma {
                             atomic::compiler_fence(Ordering::Acquire);
 
                             (self.buffer, self.payload)
+                        }
+
+                        pub fn wait(self) -> (BUFFER, TxDma<PAYLOAD, $CX>) {
+                            while !self.is_done() {}
+                            self.stop()
                         }
                     }
 
